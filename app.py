@@ -1,24 +1,26 @@
 """
-Sistema Maldini - Trading Journal (Streamlit)
------------------------------------------------
+Sistema Maldini - Trading Journal (Streamlit + Supabase)
+-----------------------------------------------------------
 App web para registrar operaciones y ver estadísticas en tiempo real.
+Los datos se guardan de forma permanente en una base de datos Supabase,
+no en un archivo local (que se puede perder si el servidor se reinicia).
 
 Correr localmente:
-    pip install streamlit pandas
+    pip install streamlit pandas supabase
+    Crea .streamlit/secrets.toml con SUPABASE_URL y SUPABASE_KEY (ver README)
     streamlit run app.py
 
 Desplegar gratis:
     Sube este archivo (+ requirements.txt) a un repo de GitHub y conéctalo
-    en https://share.streamlit.io (Streamlit Community Cloud).
+    en https://share.streamlit.io. Configura los secrets en:
+    App settings -> Secrets (en el dashboard de Streamlit Cloud).
 """
 
-import os
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-
-CSV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trades_log.csv")
+from supabase import create_client
 
 FIELDS = [
     "id", "fecha", "par", "direccion", "sesion", "bias_htf", "tf_entrada",
@@ -31,6 +33,16 @@ PARES = ["EURUSD", "XAUUSD", "NAS100", "Otro"]
 SESIONES = ["Londres", "NY", "Asia", "Londres-NY overlap", "Otro"]
 
 st.set_page_config(page_title="Sistema Maldini - Trading Journal", layout="wide")
+
+
+@st.cache_resource
+def get_client():
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+
+supabase = get_client()
 
 
 def pip_size(par):
@@ -56,19 +68,19 @@ def calcular_r(par, direccion, entrada, sl, salida):
 
 
 def load_trades():
-    if not os.path.exists(CSV_FILE):
+    response = supabase.table("trades").select("*").order("id", desc=False).execute()
+    if not response.data:
         return pd.DataFrame(columns=FIELDS)
-    return pd.read_csv(CSV_FILE)
-
-
-def save_all(df):
-    df.to_csv(CSV_FILE, index=False)
+    return pd.DataFrame(response.data)
 
 
 def append_trade(fila):
-    df = load_trades()
-    df = pd.concat([df, pd.DataFrame([fila])], ignore_index=True)
-    save_all(df)
+    fila = {k: v for k, v in fila.items() if k != "id"}  # deja que Supabase asigne el id
+    supabase.table("trades").insert(fila).execute()
+
+
+def delete_trade(trade_id):
+    supabase.table("trades").delete().eq("id", int(trade_id)).execute()
 
 
 # ---------- Header ----------
@@ -157,7 +169,6 @@ with layout_form:
                 resultado = "WIN" if r > 0 else ("LOSS" if r < 0 else "BE")
 
                 fila = {
-                    "id": len(df) + 1,
                     "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     "par": par,
                     "direccion": direccion,
@@ -166,7 +177,7 @@ with layout_form:
                     "tf_entrada": tf_entrada,
                     "entrada": entrada,
                     "stop_loss": sl,
-                    "take_profit": tp if tp else "",
+                    "take_profit": tp if tp else None,
                     "salida": salida,
                     "riesgo_pct": riesgo_pct,
                     "pips_riesgo": pips_riesgo,
@@ -203,7 +214,5 @@ with layout_log:
                 st.write(f"**Notas:** {row['notas'] or '—'}")
 
                 if st.button("Eliminar", key=f"del_{row['id']}"):
-                    df2 = load_trades()
-                    df2 = df2[df2["id"] != row["id"]]
-                    save_all(df2)
+                    delete_trade(row["id"])
                     st.rerun()
