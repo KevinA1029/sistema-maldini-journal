@@ -121,6 +121,37 @@ def marcar_enviado(checklist_id):
     ).execute()
 
 
+def load_alertas():
+    response = (
+        supabase.table("alertas_precio").select("*").order("id", desc=True).execute()
+    )
+    if not response.data:
+        return pd.DataFrame()
+    return pd.DataFrame(response.data)
+
+
+def crear_alerta(par, nivel_precio, direccion, nota):
+    fila = {
+        "par": par,
+        "nivel_precio": nivel_precio,
+        "direccion": direccion,
+        "nota": nota,
+        "activa": True,
+        "disparada": False,
+    }
+    supabase.table("alertas_precio").insert(fila).execute()
+
+
+def eliminar_alerta(alerta_id):
+    supabase.table("alertas_precio").delete().eq("id", int(alerta_id)).execute()
+
+
+def desactivar_alerta(alerta_id):
+    supabase.table("alertas_precio").update({"activa": False}).eq(
+        "id", int(alerta_id)
+    ).execute()
+
+
 def enviar_a_n8n(payload):
     """Dispara el webhook de n8n si está configurado. Devuelve (ok, mensaje)."""
     webhook_url = st.secrets.get("N8N_WEBHOOK_URL", "")
@@ -144,7 +175,9 @@ st.markdown(
 )
 st.title("Trading journal")
 
-tab_journal, tab_checklist = st.tabs(["📓 Journal", "✅ Checklist de setup"])
+tab_journal, tab_checklist, tab_alertas = st.tabs(
+    ["📓 Journal", "✅ Checklist de setup", "🎯 Alertas de precio"]
+)
 
 # =====================================================================
 # TAB 1: JOURNAL (igual que antes)
@@ -353,3 +386,81 @@ with tab_checklist:
         cols_mostrar = ["fecha", "par", "score", "enviado_telegram"]
         cols_mostrar = [c for c in cols_mostrar if c in hist.columns]
         st.dataframe(hist[cols_mostrar].head(10), use_container_width=True, hide_index=True)
+
+# =====================================================================
+# TAB 3: ALERTAS DE PRECIO
+# =====================================================================
+with tab_alertas:
+    st.subheader("Alertas de precio")
+    st.caption(
+        "Define un nivel de precio y n8n te avisa por Telegram cuando el precio "
+        "lo cruce. Esto revisa el mercado solo, sin que tengas que estar pendiente."
+    )
+
+    with st.form("nueva_alerta", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        par_alerta = c1.selectbox("Par", PARES, key="par_alerta")
+        if par_alerta == "Otro":
+            par_alerta = st.text_input("Especifica el par", key="par_alerta_otro")
+
+        nivel_precio = c2.number_input("Nivel de precio", format="%.5f")
+
+        direccion = st.selectbox(
+            "Dirección del cruce",
+            ["cualquiera", "arriba", "abajo"],
+            format_func=lambda x: {
+                "cualquiera": "Cualquiera (toca el nivel desde cualquier lado)",
+                "arriba": "Solo si sube y lo cruza hacia arriba",
+                "abajo": "Solo si baja y lo cruza hacia abajo",
+            }[x],
+        )
+        nota = st.text_input("Nota (opcional, ej: 'order block H4')")
+
+        crear = st.form_submit_button("Crear alerta", use_container_width=True)
+
+        if crear:
+            if nivel_precio == 0:
+                st.error("Ingresa un nivel de precio válido.")
+            else:
+                crear_alerta(par_alerta, nivel_precio, direccion, nota)
+                st.success(f"Alerta creada: {par_alerta} @ {nivel_precio}")
+                st.rerun()
+
+    st.divider()
+    st.subheader("Alertas activas")
+
+    alertas = load_alertas()
+    activas = alertas[alertas["activa"] == True] if not alertas.empty else alertas
+
+    if activas.empty:
+        st.caption("No tienes alertas activas.")
+    else:
+        for _, row in activas.sort_values("id", ascending=False).iterrows():
+            dir_emoji = {"cualquiera": "↕️", "arriba": "⬆️", "abajo": "⬇️"}.get(row["direccion"], "↕️")
+            titulo = f"{dir_emoji} {row['par']} @ {row['nivel_precio']}"
+            with st.expander(titulo):
+                st.write(f"**Dirección:** {row['direccion']}")
+                st.write(f"**Nota:** {row['nota'] or '—'}")
+                st.write(f"**Creada:** {row['fecha_creacion']}")
+                if row.get("ultimo_precio_visto"):
+                    st.write(f"**Último precio visto por n8n:** {row['ultimo_precio_visto']}")
+
+                bc1, bc2 = st.columns(2)
+                if bc1.button("Desactivar", key=f"desact_{row['id']}", use_container_width=True):
+                    desactivar_alerta(row["id"])
+                    st.rerun()
+                if bc2.button("Eliminar", key=f"elim_{row['id']}", use_container_width=True):
+                    eliminar_alerta(row["id"])
+                    st.rerun()
+
+    st.divider()
+    st.subheader("Historial (disparadas / inactivas)")
+    inactivas = alertas[alertas["activa"] == False] if not alertas.empty else alertas
+    if inactivas.empty:
+        st.caption("Aún no hay alertas disparadas o desactivadas.")
+    else:
+        cols_mostrar = ["fecha_creacion", "par", "nivel_precio", "direccion", "disparada", "fecha_disparada"]
+        cols_mostrar = [c for c in cols_mostrar if c in inactivas.columns]
+        st.dataframe(
+            inactivas[cols_mostrar].head(15), use_container_width=True, hide_index=True
+        )
